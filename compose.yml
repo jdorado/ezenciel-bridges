@@ -1,0 +1,13 @@
+services:
+  codex-openai-proxy:
+    build: .
+    ports:
+      - "8100:8100"
+    environment:
+      - PORT=8100
+    volumes:
+      - codex_config:/home/app/.codex
+    restart: unless-stopped
+
+volumes:
+  codex_config:
