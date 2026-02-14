@@ -13,6 +13,10 @@ Endpoints:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
+Required environment:
+
+- `BRIDGE_API_KEY` must be set to a strong secret shared by clients.
+
 Run (Docker):
 
 ```sh
@@ -22,8 +26,11 @@ docker compose run --rm codex-openai-proxy codex login --device-auth
 # Optional: verify login state
 docker compose run --rm codex-openai-proxy codex login status
 
+# Start proxy (export BRIDGE_API_KEY in your environment first).
 docker compose up -d --build
-curl -sS http://127.0.0.1:8100/health
+# Example:
+# curl -H "Authorization: Bearer $BRIDGE_API_KEY" http://127.0.0.1:8100/health
+curl -sS -H "Authorization: Bearer $BRIDGE_API_KEY" http://127.0.0.1:8100/health
 ```
 
 Notes:

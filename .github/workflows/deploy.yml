@@ -15,8 +15,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build and start via Docker Compose
+        env:
+          BRIDGE_API_KEY: ${{ secrets.BRIDGE_API_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${BRIDGE_API_KEY:-}" ]; then
+            echo "BRIDGE_API_KEY secret is required for deployment."
+            exit 1
+          fi
 
           if docker compose version >/dev/null 2>&1; then
             COMPOSE_CMD="docker compose"
@@ -30,11 +36,17 @@ jobs:
           $COMPOSE_CMD up -d --build
 
       - name: Verify deployment
+        env:
+          BRIDGE_API_KEY: ${{ secrets.BRIDGE_API_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${BRIDGE_API_KEY:-}" ]; then
+            echo "BRIDGE_API_KEY secret is required for deployment."
+            exit 1
+          fi
 
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsS http://127.0.0.1:8100/health; then
+            if curl -fsS -H "Authorization: Bearer ${BRIDGE_API_KEY}" http://127.0.0.1:8100/health; then
               echo "✅ Container is healthy"
               break
             fi

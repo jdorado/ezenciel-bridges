@@ -21,12 +21,49 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 
 def _bad_request(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=400, detail={"code": code, "message": message})
+
+
+_REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
+
+
+def _bad_unauthorized(message: str) -> HTTPException:
+    return HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": message})
+
+
+def _require_bridge_api_key(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    if not _REQUIRED_BRIDGE_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "MISCONFIGURED_SERVER",
+                "message": "BRIDGE_API_KEY environment variable is not set",
+            },
+        )
+
+    provided = (x_api_key or "").strip()
+    if not provided and authorization:
+        auth = authorization.strip()
+        if auth.lower().startswith("bearer "):
+            provided = auth[7:].strip()
+        else:
+            provided = auth
+
+    if not provided:
+        raise _bad_unauthorized(
+            "Missing API key. Provide Authorization: Bearer <key> or X-API-Key: <key>."
+        )
+
+    if provided != _REQUIRED_BRIDGE_API_KEY:
+        raise _bad_unauthorized("Invalid API key.")
 
 
 def _iter_text_chunks(text: str, chunk_size: int = 96) -> Iterable[str]:
@@ -238,11 +275,11 @@ def create_app() -> FastAPI:
     """Create a small FastAPI app exposing a subset of the OpenAI API surface."""
     app = FastAPI(title="Codex CLI OpenAI Proxy", version="0.1.0")
 
-    @app.get("/health")
+    @app.get("/health", dependencies=[Depends(_require_bridge_api_key)])
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/v1/models")
+    @app.get("/v1/models", dependencies=[Depends(_require_bridge_api_key)])
     async def models() -> dict[str, Any]:
         now = int(time.time())
         return {
@@ -263,7 +300,7 @@ def create_app() -> FastAPI:
             ],
         }
 
-    @app.post("/v1/chat/completions")
+    @app.post("/v1/chat/completions", dependencies=[Depends(_require_bridge_api_key)])
     async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
         model = _require_str(payload, "model").strip()
         messages = _require_messages(payload)
