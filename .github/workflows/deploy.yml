@@ -1,0 +1,46 @@
+name: Deploy to VM
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    # Sanity check run (manual commit test for runner verification)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and start via Docker Compose
+        run: |
+          set -euo pipefail
+
+          if docker compose version >/dev/null 2>&1; then
+            COMPOSE_CMD="docker compose"
+          elif command -v docker-compose >/dev/null 2>&1; then
+            COMPOSE_CMD="docker-compose"
+          else
+            echo "Docker Compose not found"
+            exit 1
+          fi
+
+          $COMPOSE_CMD up -d --build
+
+      - name: Verify deployment
+        run: |
+          set -euo pipefail
+
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://127.0.0.1:8100/health; then
+              echo "✅ Container is healthy"
+              break
+            fi
+            if [ "$i" = "10" ]; then
+              echo "❌ Container health check failed"
+              exit 1
+            fi
+            sleep 2
+          done
