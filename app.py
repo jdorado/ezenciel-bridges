@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -21,13 +22,17 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 
 def _bad_request(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=400, detail={"code": code, "message": message})
 
+
+_LOGGER = logging.getLogger("codex-bridge")
+_CODEX_FAILURE_TAIL_LINES = 120
+_CODEX_FAILURE_LOG_LIMIT = 2000
 
 _REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
 
@@ -36,11 +41,40 @@ def _bad_unauthorized(message: str) -> HTTPException:
     return HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": message})
 
 
+def _truncate(text: str, *, max_chars: int = _CODEX_FAILURE_LOG_LIMIT) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...(+{len(text) - max_chars} chars)"
+
+
+def _tail_text(text: str, *, max_lines: int = _CODEX_FAILURE_TAIL_LINES) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join(lines[-max_lines:])
+
+
+def _codex_exec_http_error(
+    *, code: str, request_id: str, model: str, detail_message: str, **extra: Any
+) -> HTTPException:
+    detail = {
+        "code": code,
+        "message": detail_message,
+        "request_id": request_id,
+        "model": model,
+        "details": extra,
+    }
+    return HTTPException(status_code=500, detail=detail)
+
+
 def _require_bridge_api_key(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
     if not _REQUIRED_BRIDGE_API_KEY:
+        _LOGGER.error("bridge_api_key_missing")
         raise HTTPException(
             status_code=500,
             detail={
@@ -58,11 +92,13 @@ def _require_bridge_api_key(
             provided = auth
 
     if not provided:
+        _LOGGER.warning("bridge_auth_missing")
         raise _bad_unauthorized(
             "Missing API key. Provide Authorization: Bearer <key> or X-API-Key: <key>."
         )
 
     if provided != _REQUIRED_BRIDGE_API_KEY:
+        _LOGGER.warning("bridge_auth_invalid request_key_len=%s", len(provided))
         raise _bad_unauthorized("Invalid API key.")
 
 
@@ -184,10 +220,18 @@ def _normalize_message_content(content: Any) -> str:
     return "".join(output)
 
 
-def _codex_exec_text(*, prompt: str, model: str, timeout_s: int = 180) -> _CodexExecResult:
+def _codex_exec_text(
+    *, request_id: str, prompt: str, model: str, timeout_s: int = 180
+) -> _CodexExecResult:
     codex_path = shutil.which("codex")
     if codex_path is None:
-        raise RuntimeError("`codex` not found on PATH")
+        _LOGGER.error("codex_exec_missing request_id=%s model=%s", request_id, model)
+        raise _codex_exec_http_error(
+            code="CODEX_NOT_FOUND",
+            request_id=request_id,
+            model=model,
+            detail_message="`codex` not found on PATH",
+        )
 
     cmd = [
         codex_path,
@@ -206,25 +250,119 @@ def _codex_exec_text(*, prompt: str, model: str, timeout_s: int = 180) -> _Codex
         prompt,
     ]
 
-    proc = subprocess.run(
-        cmd,
-        cwd=os.getcwd(),
-        env=os.environ.copy(),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout_s,
+    _LOGGER.info(
+        "codex_exec_start request_id=%s model=%s timeout_s=%s prompt_chars=%s cmd=%s",
+        request_id,
+        model,
+        timeout_s,
+        len(prompt),
+        " ".join([cmd[0], "-a", "on-failure", "exec", "--model", model]),
     )
+
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=os.getcwd(),
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_s,
+        )
+    except OSError as exc:
+        _LOGGER.error(
+            "codex_exec_oserror request_id=%s model=%s error=%s",
+            request_id,
+            model,
+            str(exc),
+        )
+        raise _codex_exec_http_error(
+            code="CODEX_EXEC_OS_ERROR",
+            request_id=request_id,
+            model=model,
+            detail_message="Failed to run codex executable",
+            error=str(exc),
+            command=[cmd[0], "-a", "exec", "--model", model],
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        tail = _tail_text(exc.stdout if isinstance(exc.stdout, str) else "")
+        _LOGGER.error(
+            "codex_exec_timeout request_id=%s model=%s timeout_s=%s output_tail=%s",
+            request_id,
+            model,
+            timeout_s,
+            _truncate(tail, max_chars=600),
+        )
+        raise _codex_exec_http_error(
+            code="CODEX_EXEC_TIMEOUT",
+            request_id=request_id,
+            model=model,
+            detail_message=f"codex exec timed out after {timeout_s}s",
+            returncode=None,
+            timeout_s=timeout_s,
+            tail=_truncate(tail),
+        ) from exc
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
     output = proc.stdout or ""
+    tail = _tail_text(output)
     if proc.returncode != 0:
-        tail = "\n".join(output.splitlines()[-80:])
-        raise RuntimeError(f"codex exec exited {proc.returncode}. Output tail:\n{tail}")
+        _LOGGER.error(
+            "codex_exec_failed request_id=%s model=%s returncode=%s elapsed_ms=%s output_tail=%s",
+            request_id,
+            model,
+            proc.returncode,
+            elapsed_ms,
+            _truncate(tail),
+        )
+        raise _codex_exec_http_error(
+            code="CODEX_EXEC_FAILED",
+            request_id=request_id,
+            model=model,
+            detail_message=f"codex exec exited {proc.returncode}",
+            returncode=proc.returncode,
+            elapsed_ms=elapsed_ms,
+            output_tail=tail,
+            command=[cmd[0], "-a", "exec", "--model", model],
+        )
 
     events = list(_iter_json_objects_from_mixed_output(output))
+    if events:
+        _LOGGER.info(
+            "codex_exec_events request_id=%s model=%s event_count=%s last_event_type=%s",
+            request_id,
+            model,
+            len(events),
+            events[-1].get("type") if isinstance(events[-1], dict) else None,
+        )
     text = _extract_last_agent_message(events)
     if text is None:
-        tail = "\n".join(output.splitlines()[-80:])
-        raise RuntimeError(f"codex exec produced no agent_message event. Output tail:\n{tail}")
+        _LOGGER.error(
+            "codex_exec_no_agent_message request_id=%s model=%s event_count=%s output_tail=%s",
+            request_id,
+            model,
+            len(events),
+            _truncate(tail),
+        )
+        raise _codex_exec_http_error(
+            code="CODEX_EXEC_NO_AGENT_MESSAGE",
+            request_id=request_id,
+            model=model,
+            detail_message="codex exec produced no agent_message event",
+            event_count=len(events),
+            event_types=[e.get("type") for e in events if isinstance(e, dict)],
+            output_tail=tail,
+        )
+
+    _LOGGER.info(
+        "codex_exec_success request_id=%s model=%s elapsed_ms=%s event_count=%s completion_chars=%s",
+        request_id,
+        model,
+        elapsed_ms,
+        len(events),
+        len(text),
+    )
 
     return _CodexExecResult(text=text, raw_json_events=events)
 
@@ -301,7 +439,22 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_bridge_api_key)])
-    async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
+    async def chat_completions(
+        payload: dict[str, Any], request: Request, response: Response
+    ) -> dict[str, Any]:
+        request_id = request.headers.get("x-request-id") or request.headers.get(
+            "X-Request-ID"
+        ) or str(uuid.uuid4())
+        response.headers["X-Request-ID"] = request_id
+        started = time.time()
+        _LOGGER.info(
+            "chat_completions_start request_id=%s model=%s stream=%s message_count=%s",
+            request_id,
+            payload.get("model"),
+            payload.get("stream", False),
+            len(payload.get("messages", [])),
+        )
+
         model = _require_str(payload, "model").strip()
         messages = _require_messages(payload)
         stream = _optional_stream(payload)
@@ -310,15 +463,41 @@ def create_app() -> FastAPI:
         completion_id = f"chatcmpl_{uuid.uuid4().hex}"
         created = int(time.time())
         try:
-            result = await asyncio.to_thread(_codex_exec_text, prompt=prompt, model=model)
+            result = await asyncio.to_thread(
+                _codex_exec_text, request_id=request_id, prompt=prompt, model=model
+            )
         except HTTPException:
+            _LOGGER.warning(
+                "chat_completions_failed request_id=%s model=%s",
+                request_id,
+                model,
+            )
             raise
         except Exception as exc:
+            _LOGGER.exception(
+                "chat_completions_unexpected request_id=%s model=%s error=%s",
+                request_id,
+                model,
+                str(exc),
+            )
             raise HTTPException(
                 status_code=500,
-                detail={"code": "CODEX_EXEC_FAILED", "message": str(exc)},
+                detail={
+                    "code": "CODEX_EXEC_FAILED",
+                    "message": str(exc),
+                    "request_id": request_id,
+                    "model": model,
+                },
             ) from exc
 
+        elapsed_ms = int((time.time() - started) * 1000)
+        _LOGGER.info(
+            "chat_completions_success request_id=%s model=%s elapsed_ms=%s completion_chars=%s",
+            request_id,
+            model,
+            elapsed_ms,
+            len(result.text),
+        )
         if stream:
             return StreamingResponse(
                 _stream_chat_completion(
@@ -328,6 +507,7 @@ def create_app() -> FastAPI:
                     created=created,
                 ),
                 media_type="text/event-stream",
+                headers={"X-Request-ID": request_id},
             )
 
         # OpenAI-ish response.
