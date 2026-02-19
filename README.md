@@ -16,6 +16,7 @@ Endpoints:
 Required environment:
 
 - `BRIDGE_API_KEY` must be set to a strong secret shared by clients.
+- `CODEX_EXEC_TIMEOUT_SECONDS` optional. Defaults to `1200` (20 minutes).
 
 Run (Docker):
 

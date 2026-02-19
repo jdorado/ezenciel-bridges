@@ -37,6 +37,27 @@ _CODEX_FAILURE_LOG_LIMIT = 2000
 _REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
 
 
+def _read_positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _LOGGER.warning("invalid_env_int name=%s raw=%s using_default=%s", name, raw, default)
+        return default
+    if value <= 0:
+        _LOGGER.warning("non_positive_env_int name=%s raw=%s using_default=%s", name, raw, default)
+        return default
+    return value
+
+
+_DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS = _read_positive_int_env(
+    "CODEX_EXEC_TIMEOUT_SECONDS",
+    1200,
+)
+
+
 def _bad_unauthorized(message: str) -> HTTPException:
     return HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": message})
 
@@ -221,7 +242,7 @@ def _normalize_message_content(content: Any) -> str:
 
 
 def _codex_exec_text(
-    *, request_id: str, prompt: str, model: str, timeout_s: int = 180
+    *, request_id: str, prompt: str, model: str, timeout_s: int = _DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS
 ) -> _CodexExecResult:
     codex_path = shutil.which("codex")
     if codex_path is None:

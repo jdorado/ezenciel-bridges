@@ -6,6 +6,7 @@ services:
     environment:
       - PORT=8100
       - BRIDGE_API_KEY=${BRIDGE_API_KEY}
+      - CODEX_EXEC_TIMEOUT_SECONDS=${CODEX_EXEC_TIMEOUT_SECONDS:-1200}
     volumes:
       - codex_config:/home/app/.codex
     restart: unless-stopped
