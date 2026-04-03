@@ -2,7 +2,8 @@
 
 This is a thin bridge intended to let existing OpenAI-compatible clients talk to a local
 HTTP endpoint while the underlying "model" call is performed by spawning
-`codex exec --json` and extracting the final agent message.
+`codex exec --json` and extracting the final agent message. Prompts are sent via stdin,
+not argv, so large message payloads do not hit the OS argument-length limit.
 
 Design constraints:
 - No fallbacks and no silent retries: one subprocess call per request.
@@ -268,7 +269,7 @@ def _codex_exec_text(
         "--skip-git-repo-check",
         "--model",
         model,
-        prompt,
+        "-",
     ]
 
     _LOGGER.info(
@@ -287,6 +288,7 @@ def _codex_exec_text(
             cwd=os.getcwd(),
             env=os.environ.copy(),
             text=True,
+            input=prompt,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout_s,
