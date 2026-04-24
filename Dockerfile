@@ -9,8 +9,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl ripgrep zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Codex CLI (Linux). Version matches the one used in the stocks repo.
-ARG CODEX_VERSION=0.101.0
+# Install Codex CLI (Linux).
+ARG CODEX_VERSION=0.124.0
 ARG TARGETARCH
 RUN set -eu; \
     ARCH_RAW="${TARGETARCH:-$(uname -m)}"; \
