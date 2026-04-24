@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "ezenciel-bridges"
+version = "0.1.0"
+description = "OpenAI-compatible Codex bridge service"
+authors = []
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+fastapi = ">=0.115.0,<0.116.0"
+uvicorn = {version = ">=0.23.1", extras = ["standard"]}
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

@@ -51,8 +51,8 @@ client<llm> LocalCodexProxy {
   options {
     base_url "http://127.0.0.1:8100/v1"
 
-    // BAML requires an api_key field. The proxy ignores it, but it must be non-empty.
-    api_key env.OPENROUTER_API_KEY
+    // Must match BRIDGE_API_KEY configured on the proxy.
+    api_key env.BRIDGE_API_KEY
 
     // This is forwarded to `codex exec --model <model>`.
     model "gpt-5.3-codex"
@@ -64,8 +64,12 @@ Example OpenAI Python SDK:
 
 ```py
 from openai import OpenAI
+import os
 
-client = OpenAI(base_url="http://127.0.0.1:8100/v1", api_key="sk-dummy")
+client = OpenAI(
+    base_url="http://127.0.0.1:8100/v1",
+    api_key=os.environ["BRIDGE_API_KEY"],
+)
 resp = client.chat.completions.create(
     model="gpt-5.3-codex",
     messages=[{"role": "user", "content": "Say OK"}],
