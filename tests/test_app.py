@@ -74,6 +74,28 @@ class TestCodexExecText(unittest.TestCase):
         self.assertEqual(kwargs["cmd"] if "cmd" in kwargs else run_mock.call_args.args[0][-1], "-")
         self.assertNotIn(prompt, run_mock.call_args.args[0])
 
+    def test_reasoning_effort_is_forwarded_to_codex_config(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["codex"],
+            returncode=0,
+            stdout='{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}\n',
+        )
+
+        with (
+            patch("app.shutil.which", return_value="/usr/local/bin/codex"),
+            patch("app.subprocess.run", return_value=completed) as run_mock,
+        ):
+            app._codex_exec_text(
+                request_id="req-2",
+                prompt="hello",
+                model="gpt-5.6-terra",
+                reasoning_effort="high",
+                timeout_s=30,
+            )
+
+        self.assertIn('-c', run_mock.call_args.args[0])
+        self.assertIn('model_reasoning_effort="high"', run_mock.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

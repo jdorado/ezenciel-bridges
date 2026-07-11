@@ -34,6 +34,7 @@ def _bad_request(code: str, message: str) -> HTTPException:
 _LOGGER = logging.getLogger("codex-bridge")
 _CODEX_FAILURE_TAIL_LINES = 120
 _CODEX_FAILURE_LOG_LIMIT = 2000
+_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 
 _REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
 
@@ -198,6 +199,18 @@ def _optional_stream(payload: dict[str, Any]) -> bool:
     raise _bad_request("INVALID_REQUEST", "stream must be a boolean")
 
 
+def _optional_reasoning_effort(payload: dict[str, Any]) -> str | None:
+    value = payload.get("reasoning_effort")
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip().lower() not in _REASONING_EFFORTS:
+        raise _bad_request(
+            "INVALID_REQUEST",
+            "reasoning_effort must be one of: " + ", ".join(sorted(_REASONING_EFFORTS)),
+        )
+    return value.strip().lower()
+
+
 def _build_prompt(messages: list[dict[str, Any]]) -> str:
     # Keep formatting deterministic and explicit.
     parts: list[str] = []
@@ -243,7 +256,12 @@ def _normalize_message_content(content: Any) -> str:
 
 
 def _codex_exec_text(
-    *, request_id: str, prompt: str, model: str, timeout_s: int = _DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS
+    *,
+    request_id: str,
+    prompt: str,
+    model: str,
+    reasoning_effort: str | None = None,
+    timeout_s: int = _DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS,
 ) -> _CodexExecResult:
     codex_path = shutil.which("codex")
     if codex_path is None:
@@ -269,16 +287,19 @@ def _codex_exec_text(
         "--skip-git-repo-check",
         "--model",
         model,
-        "-",
     ]
+    if reasoning_effort:
+        cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+    cmd.append("-")
 
     _LOGGER.info(
-        "codex_exec_start request_id=%s model=%s timeout_s=%s prompt_chars=%s cmd=%s",
+        "codex_exec_start request_id=%s model=%s reasoning_effort=%s timeout_s=%s prompt_chars=%s cmd=%s",
         request_id,
         model,
+        reasoning_effort,
         timeout_s,
         len(prompt),
-        " ".join([cmd[0], "-a", "never", "exec", "--model", model]),
+        " ".join(cmd[:-1]),
     )
 
     started = time.monotonic()
@@ -481,13 +502,18 @@ def create_app() -> FastAPI:
         model = _require_str(payload, "model").strip()
         messages = _require_messages(payload)
         stream = _optional_stream(payload)
+        reasoning_effort = _optional_reasoning_effort(payload)
 
         prompt = _build_prompt(messages)
         completion_id = f"chatcmpl_{uuid.uuid4().hex}"
         created = int(time.time())
         try:
             result = await asyncio.to_thread(
-                _codex_exec_text, request_id=request_id, prompt=prompt, model=model
+                _codex_exec_text,
+                request_id=request_id,
+                prompt=prompt,
+                model=model,
+                reasoning_effort=reasoning_effort,
             )
         except HTTPException:
             _LOGGER.warning(
