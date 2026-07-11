@@ -258,7 +258,7 @@ def _codex_exec_text(
     cmd = [
         codex_path,
         "-a",
-        "on-failure",
+        "never",
         "exec",
         "--ephemeral",
         "--json",
@@ -278,7 +278,7 @@ def _codex_exec_text(
         model,
         timeout_s,
         len(prompt),
-        " ".join([cmd[0], "-a", "on-failure", "exec", "--model", model]),
+        " ".join([cmd[0], "-a", "never", "exec", "--model", model]),
     )
 
     started = time.monotonic()
