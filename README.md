@@ -18,6 +18,22 @@ Required environment:
 - `BRIDGE_API_KEY` must be set to a strong secret shared by clients.
 - `CODEX_EXEC_TIMEOUT_SECONDS` optional. Defaults to `1200` (20 minutes).
 
+## Security and deployment
+
+This bridge is intended only for trusted clients. Anyone with `BRIDGE_API_KEY` can submit
+prompts to the authenticated Codex session, so treat that key as privileged access rather
+than an ordinary application password.
+
+- The supplied Compose configuration binds the service to `127.0.0.1` by default. Put it
+  behind an authenticated reverse proxy or a private network if remote clients need access.
+- Keep `BRIDGE_API_KEY`, the Docker `codex_config` volume, and any local `.env` files private.
+  The volume contains the Codex login state and must never be committed, copied into images,
+  or shared with untrusted users.
+- The Codex subprocess intentionally receives only a small, non-secret environment; do not
+  add credentials to that allowlist without a concrete runtime requirement.
+- Report suspected vulnerabilities privately to the repository owner rather than in a public
+  issue.
+
 Run (Docker):
 
 ```sh

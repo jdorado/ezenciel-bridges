@@ -96,6 +96,29 @@ class TestCodexExecText(unittest.TestCase):
         self.assertIn('-c', run_mock.call_args.args[0])
         self.assertIn('model_reasoning_effort="high"', run_mock.call_args.args[0])
 
+    def test_codex_child_environment_excludes_bridge_key(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "BRIDGE_API_KEY": "not-for-child-process",
+                "HOME": "/home/app",
+                "PATH": "/usr/local/bin:/usr/bin",
+                "LANG": "C.UTF-8",
+            },
+            clear=True,
+        ):
+            child_env = app._codex_child_env()
+
+        self.assertEqual(
+            child_env,
+            {
+                "HOME": "/home/app",
+                "PATH": "/usr/local/bin:/usr/bin",
+                "LANG": "C.UTF-8",
+            },
+        )
+        self.assertNotIn("BRIDGE_API_KEY", child_env)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ Design constraints:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ _CODEX_FAILURE_LOG_LIMIT = 2000
 _REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 
 _REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
+_CODEX_CHILD_ENV_NAMES = ("HOME", "LANG", "LC_ALL", "PATH", "TERM", "TZ")
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
@@ -62,6 +64,15 @@ _DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS = _read_positive_int_env(
 
 def _bad_unauthorized(message: str) -> HTTPException:
     return HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": message})
+
+
+def _codex_child_env() -> dict[str, str]:
+    """Return the minimum non-secret environment required by the Codex child process."""
+    return {
+        name: value
+        for name in _CODEX_CHILD_ENV_NAMES
+        if (value := os.getenv(name)) is not None
+    }
 
 
 def _truncate(text: str, *, max_chars: int = _CODEX_FAILURE_LOG_LIMIT) -> str:
@@ -120,7 +131,9 @@ def _require_bridge_api_key(
             "Missing API key. Provide Authorization: Bearer <key> or X-API-Key: <key>."
         )
 
-    if provided != _REQUIRED_BRIDGE_API_KEY:
+    if not hmac.compare_digest(
+        provided.encode("utf-8"), _REQUIRED_BRIDGE_API_KEY.encode("utf-8")
+    ):
         _LOGGER.warning("bridge_auth_invalid request_key_len=%s", len(provided))
         raise _bad_unauthorized("Invalid API key.")
 
@@ -307,7 +320,7 @@ def _codex_exec_text(
         proc = subprocess.run(
             cmd,
             cwd=os.getcwd(),
-            env=os.environ.copy(),
+            env=_codex_child_env(),
             text=True,
             input=prompt,
             stdout=subprocess.PIPE,
