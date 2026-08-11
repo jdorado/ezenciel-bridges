@@ -17,6 +17,7 @@ jobs:
       - name: Build and start via Docker Compose
         env:
           BRIDGE_API_KEY: ${{ secrets.BRIDGE_API_KEY }}
+          BRIDGE_BIND_ADDRESS: 0.0.0.0
         run: |
           set -euo pipefail
           if [ -z "${BRIDGE_API_KEY:-}" ]; then

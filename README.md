@@ -17,6 +17,8 @@ Required environment:
 
 - `BRIDGE_API_KEY` must be set to a strong secret shared by clients.
 - `CODEX_EXEC_TIMEOUT_SECONDS` optional. Defaults to `1200` (20 minutes).
+- `BRIDGE_BIND_ADDRESS` optional. Defaults to `127.0.0.1`; the trusted VM
+  deployment sets it to `0.0.0.0` so authenticated remote clients can connect.
 
 ## Security and deployment
 

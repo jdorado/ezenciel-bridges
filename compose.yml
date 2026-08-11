@@ -2,7 +2,7 @@ services:
   codex-openai-proxy:
     build: .
     ports:
-      - "127.0.0.1:8100:8100"
+      - "${BRIDGE_BIND_ADDRESS:-127.0.0.1}:8100:8100"
     environment:
       - PORT=8100
       - BRIDGE_API_KEY=${BRIDGE_API_KEY}
