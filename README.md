@@ -31,6 +31,12 @@ than an ordinary application password.
 - Keep `BRIDGE_API_KEY`, the Docker `codex_config` volume, and any local `.env` files private.
   The volume contains the Codex login state and must never be committed, copied into images,
   or shared with untrusted users.
+- The Stocks VM runs a separate private Compose layout in `/opt/ezenciel-bridges`
+  with the existing `ezenciel-bridges_codex_config` volume and
+  `stocks-bridge-net`. Build this repository's source into
+  `ezenciel-bridges-private:current` and recreate that service from its private
+  Compose file; the repository Compose file is for local use only. Merging this
+  repository runs verification, not deployment.
 - The Codex subprocess intentionally receives only a small, non-secret environment; do not
   add credentials to that allowlist without a concrete runtime requirement.
 - Report suspected vulnerabilities privately to the repository owner rather than in a public
