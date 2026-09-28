@@ -73,7 +73,8 @@ client<llm> LocalCodexProxy {
     api_key env.BRIDGE_API_KEY
 
     // This is forwarded to `codex exec --model <model>`.
-    model "gpt-5.3-codex"
+    model "gpt-6-luna"
+    reasoning_effort "max"
   }
 }
 ```
@@ -89,7 +90,8 @@ client = OpenAI(
     api_key=os.environ["BRIDGE_API_KEY"],
 )
 resp = client.chat.completions.create(
-    model="gpt-5.3-codex",
+    model="gpt-6-luna",
+    reasoning_effort="max",
     messages=[{"role": "user", "content": "Say OK"}],
 )
 print(resp.choices[0].message.content)

@@ -481,13 +481,13 @@ def create_app() -> FastAPI:
             "object": "list",
             "data": [
                 {
-                    "id": "gpt-5-codex",
+                    "id": "gpt-6-luna",
                     "object": "model",
                     "created": now,
                     "owned_by": "openai",
                 },
                 {
-                    "id": "gpt-5",
+                    "id": "gpt-6-sol",
                     "object": "model",
                     "created": now,
                     "owned_by": "openai",
