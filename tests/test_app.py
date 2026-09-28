@@ -88,13 +88,13 @@ class TestCodexExecText(unittest.TestCase):
             app._codex_exec_text(
                 request_id="req-2",
                 prompt="hello",
-                model="gpt-5.6-terra",
-                reasoning_effort="high",
+                model="gpt-6-luna",
+                reasoning_effort="max",
                 timeout_s=30,
             )
 
         self.assertIn('-c', run_mock.call_args.args[0])
-        self.assertIn('model_reasoning_effort="high"', run_mock.call_args.args[0])
+        self.assertIn('model_reasoning_effort="max"', run_mock.call_args.args[0])
 
     def test_codex_child_environment_excludes_bridge_key(self) -> None:
         with patch.dict(
