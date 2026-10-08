@@ -1,0 +1,29 @@
+name: ezenciel-bridges
+
+services:
+  codex-openai-proxy:
+    image: ${BRIDGE_IMAGE:-ezenciel-bridges-private:current}
+    environment:
+      PORT: "8100"
+      BRIDGE_API_KEY: "${BRIDGE_API_KEY}"
+      CODEX_EXEC_TIMEOUT_SECONDS: "${CODEX_EXEC_TIMEOUT_SECONDS:-1200}"
+    volumes:
+      - codex_config:/home/app/.codex
+      - claude_config:/home/app/.claude
+    networks:
+      stocks-bridge-net:
+        aliases:
+          - codex-openai-proxy
+    restart: unless-stopped
+
+volumes:
+  codex_config:
+    external: true
+    name: ezenciel-bridges_codex_config
+  claude_config:
+    external: true
+    name: ezenciel-bridges_claude_config
+
+networks:
+  stocks-bridge-net:
+    external: true

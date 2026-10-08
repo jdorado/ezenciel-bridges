@@ -482,6 +482,7 @@ def _claude_exec_text(*, request_id: str, prompt: str, model: str,
     if schema is not None:
         cmd.extend(["--json-schema", json.dumps(schema)])
     env = _codex_child_env()
+    env["DISABLE_AUTOUPDATER"] = "1"
     if config_dir := os.getenv("CLAUDE_CONFIG_DIR"):
         env["CLAUDE_CONFIG_DIR"] = config_dir
     try:
@@ -508,6 +509,8 @@ def _claude_exec_text(*, request_id: str, prompt: str, model: str,
     except (ValueError, KeyError, TypeError) as exc:
         raise _codex_exec_http_error(code="CLAUDE_INVALID_RESPONSE", request_id=request_id,
                                     model=model, detail_message="Claude returned no valid completion") from exc
+    _LOGGER.info("claude_exec_success request_id=%s model=%s reasoning_effort=%s model_usage=%s",
+                 request_id, model, reasoning_effort, list(result.get("modelUsage", {})))
     return _CodexExecResult(text=text, raw_json_events=[result])
 
 

@@ -63,7 +63,7 @@ than an ordinary application password.
   with the existing `ezenciel-bridges_codex_config` volume and
   `stocks-bridge-net`. Build this repository's source into
   `ezenciel-bridges-private:current` and recreate that service from its private
-  Compose file; the repository Compose file is for local use only. Merging this
+  Compose file sourced from `compose.vm.yml`; `compose.yml` is for local use only. Merging this
   repository runs verification, not deployment.
 - Claude login uses a separate `claude_config` volume mounted at
   `/home/app/.claude` (`CLAUDE_CONFIG_DIR`). Initialize a new volume's ownership
@@ -77,6 +77,11 @@ than an ordinary application password.
   Open the authorization URL in your Mac browser and finish the CLI flow in
   that terminal. Login material remains in the VM volume. Verify with
   `claude auth status` inside the same container and user.
+- VM activation: build the exact reviewed commit, create the private
+  `ezenciel-bridges_claude_config` volume, initialize UID/GID 10001, and install
+  `compose.vm.yml` as `/opt/ezenciel-bridges/compose.yml`. Keep its protected `.env`.
+  Set `BRIDGE_IMAGE` to the commit-tagged image for QA. Check for active CLI
+  subprocesses before recreating the shared service.
 - The Codex subprocess intentionally receives only a small, non-secret environment; do not
   add credentials to that allowlist without a concrete runtime requirement.
 - Report suspected vulnerabilities privately to the repository owner rather than in a public
