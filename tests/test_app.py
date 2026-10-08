@@ -122,3 +122,71 @@ class TestCodexExecText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestModelContract(unittest.TestCase):
+    def test_model_selects_cli_and_default_effort(self):
+        self.assertEqual(app._model_options({'model': 'gpt-6.1-sol'}),
+                         ('gpt-6.1-sol', 'codex', 'medium'))
+        self.assertEqual(app._model_options({'model': 'claude-sonnet-5-5', 'reasoning_effort': 'high'}),
+                         ('claude-sonnet-5-5', 'claude', 'high'))
+
+    def test_invalid_combinations_are_rejected_before_execution(self):
+        for payload in (
+            {'model': 'unknown'},
+            {'model': 'claude-sonnet-5-5', 'reasoning_effort': 'ultra'},
+            {'model': 'gpt-6-luna', 'reasoning_effort': 'ultra'},
+            {'model': 'gpt-6.1-sol', 'provider': 'claude'},
+            {'model': 'gpt-6.1-sol', 'reasoning_effort': 'none'},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(app.HTTPException) as error:
+                app._model_options(payload)
+            self.assertEqual(error.exception.status_code, 400)
+
+    def test_schema_is_passed_to_codex_as_temporary_file(self):
+        import json
+        import pathlib
+        schema = {'type': 'object', 'properties': {'reply': {'type': 'string'}}}
+        schema_paths = []
+        def reply(**kwargs):
+            schema_paths.append(kwargs['schema_path'])
+            self.assertEqual(json.loads(pathlib.Path(kwargs['schema_path']).read_text()), schema)
+            return app._CodexExecResult('ok', [])
+        with patch('app._codex_exec_text', side_effect=reply), patch('app._claude_exec_text') as claude:
+            app._cli_reply(request_id='schema', prompt='hello', model='gpt-6.1-sol',
+                           provider='codex', reasoning_effort='medium', schema=schema)
+        claude.assert_not_called()
+        self.assertFalse(pathlib.Path(schema_paths[0]).exists())
+
+    def test_claude_native_schema_effort_and_isolation(self):
+        import json
+        schema = {'type': 'object', 'properties': {'reply': {'type': 'string'}}}
+        completed = subprocess.CompletedProcess(['claude'], 0,
+            stdout=json.dumps({'is_error': False, 'structured_output': {'reply': 'ok'}}))
+        with patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
+             patch('app.subprocess.run', return_value=completed) as run:
+            result = app._claude_exec_text(request_id='claude', prompt='private prompt',
+                model='claude-sonnet-5-5', reasoning_effort='medium', schema=schema)
+        self.assertEqual(json.loads(result.text), {'reply': 'ok'})
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index('--model') + 1], 'claude-sonnet-5-5')
+        self.assertEqual(cmd[cmd.index('--effort') + 1], 'medium')
+        self.assertEqual(cmd[cmd.index('--tools') + 1], '')
+        self.assertEqual(json.loads(cmd[cmd.index('--json-schema') + 1]), schema)
+        self.assertIn('--no-session-persistence', cmd)
+        self.assertNotIn('private prompt', cmd)
+        self.assertEqual(run.call_args.kwargs['input'], 'private prompt')
+        self.assertNotIn('BRIDGE_API_KEY', run.call_args.kwargs['env'])
+
+    def test_claude_error_is_not_a_success_or_secret_disclosure(self):
+        completed = subprocess.CompletedProcess(['claude'], 1, stdout='secret', stderr='secret')
+        with patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
+             patch('app.subprocess.run', return_value=completed), \
+             self.assertRaises(app.HTTPException) as error:
+            app._claude_exec_text(request_id='error', prompt='hello',
+                model='claude-sonnet-5-5', reasoning_effort='medium')
+        self.assertNotIn('secret', str(error.exception.detail))
+
+    def test_malformed_output_format_is_rejected(self):
+        for response_format in ('json', {'type': 'json_object'}, {'type': 'json_schema'}):
+            with self.assertRaises(app.HTTPException):
+                app._output_schema({'response_format': response_format})

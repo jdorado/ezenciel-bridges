@@ -17,12 +17,13 @@ def main() -> int:
         return 2
 
     base_url = os.environ.get("BRIDGE_BASE_URL", "http://127.0.0.1:8100").rstrip("/")
-    model = os.environ.get("BRIDGE_MODEL", "gpt-5-codex")
+    model = os.environ.get("BRIDGE_MODEL", "gpt-6.1-sol")
     timeout = int(os.environ.get("BRIDGE_TIMEOUT_SECONDS", "1200"))
     prompt = " ".join(sys.argv[1:]).strip() or "Reply with exactly: bridge smoke OK"
 
     payload = {
         "model": model,
+        "reasoning_effort": os.environ.get("BRIDGE_EFFORT", "medium"),
         "messages": [{"role": "user", "content": prompt}],
     }
     request = urllib.request.Request(

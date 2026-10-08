@@ -9,7 +9,9 @@ services:
       - CODEX_EXEC_TIMEOUT_SECONDS=${CODEX_EXEC_TIMEOUT_SECONDS:-1200}
     volumes:
       - codex_config:/home/app/.codex
+      - claude_config:/home/app/.claude
     restart: unless-stopped
 
 volumes:
   codex_config:
+  claude_config:
