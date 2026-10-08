@@ -4,8 +4,36 @@ Small, Docker-friendly "bridge" services used across ezenciel projects.
 
 ## codex-openai-proxy
 
-OpenAI-compatible HTTP proxy that fulfills chat-completions by spawning the Codex CLI
-(`codex exec --json`).
+OpenAI-compatible HTTP proxy that fulfills chat-completions with Codex or Claude
+CLI. The full model ID selects exactly one CLI, without provider fallback.
+
+The image pins Codex `0.161.0` and Claude Code `2.1.293`. Authenticated clients
+discover the reviewed model IDs, provider and allowed efforts from `GET /v1/models`.
+Supported families: GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna,
+Claude Sonnet 5.5 and Opus 5.5. Listing a model does not establish account access.
+
+Each request requires `model` and `messages`. `reasoning_effort` defaults to
+`medium`; an optional `provider` must match `codex` or `claude` for that model.
+Both providers support `low`, `medium`, `high`, `xhigh`, `max`; the advertised
+Codex models additionally support `ultra` where available. Unsupported models
+or effort combinations return HTTP 400 before launching a CLI.
+
+```json
+{
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "medium",
+  "messages": [{"role": "user", "content": "Reply with exactly OK"}]
+}
+```
+
+Use `claude-sonnet-5-5` for the same request through Claude. Structured output
+uses `response_format: {"type":"json_schema","json_schema":{"schema":{...}}}`;
+the bridge passes the schema to each CLI's native output option. Claude's
+`structured_output` becomes the JSON string in `choices[0].message.content`.
+Non-streamed responses also report the selected provider and effort. Streaming
+still emits chunks after the CLI finishes; it is not live CLI token streaming.
+Other generation parameters are ignored. Claude completions disable tools,
+hooks, project/user settings, skills, Chrome and MCP, and do not persist sessions.
 
 Endpoints:
 
@@ -28,7 +56,7 @@ than an ordinary application password.
 
 - The supplied Compose configuration binds the service to `127.0.0.1` by default. Put it
   behind an authenticated reverse proxy or a private network if remote clients need access.
-- Keep `BRIDGE_API_KEY`, the Docker `codex_config` volume, and any local `.env` files private.
+- Keep `BRIDGE_API_KEY`, the Docker `codex_config` and `claude_config` volumes, and any local `.env` files private.
   The volume contains the Codex login state and must never be committed, copied into images,
   or shared with untrusted users.
 - The Stocks VM runs a separate private Compose layout in `/opt/ezenciel-bridges`
@@ -37,6 +65,18 @@ than an ordinary application password.
   `ezenciel-bridges-private:current` and recreate that service from its private
   Compose file; the repository Compose file is for local use only. Merging this
   repository runs verification, not deployment.
+- Claude login uses a separate `claude_config` volume mounted at
+  `/home/app/.claude` (`CLAUDE_CONFIG_DIR`). Initialize a new volume's ownership
+  to UID/GID 10001 before login. Never mount a Mac keychain or copy an API-key
+  helper into the VM. From a Mac terminal, start a private VM login:
+
+  ```sh
+  ssh -t ez-vm 'sudo docker exec -it --user 10001 ezenciel-bridges-codex-openai-proxy-1 claude auth login'
+  ```
+
+  Open the authorization URL in your Mac browser and finish the CLI flow in
+  that terminal. Login material remains in the VM volume. Verify with
+  `claude auth status` inside the same container and user.
 - The Codex subprocess intentionally receives only a small, non-secret environment; do not
   add credentials to that allowlist without a concrete runtime requirement.
 - Report suspected vulnerabilities privately to the repository owner rather than in a public

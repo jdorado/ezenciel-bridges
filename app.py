@@ -1,4 +1,4 @@
-"""OpenAI-compatible local proxy that serves completions via the Codex CLI.
+"""OpenAI-compatible local proxy serving completions via Codex and Claude CLIs.
 
 This is a thin bridge intended to let existing OpenAI-compatible clients talk to a local
 HTTP endpoint while the underlying "model" call is performed by spawning
@@ -7,7 +7,7 @@ not argv, so large message payloads do not hit the OS argument-length limit.
 
 Design constraints:
 - No fallbacks and no silent retries: one subprocess call per request.
-- Keep request handling pass-through: only require `model` and `messages`; ignore other fields.
+- Model selects one CLI; validate effort and pass native output schemas without retries.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -36,6 +37,19 @@ _LOGGER = logging.getLogger("codex-bridge")
 _CODEX_FAILURE_TAIL_LINES = 120
 _CODEX_FAILURE_LOG_LIMIT = 2000
 _REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+_COMMON_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Reviewed CLI model IDs. Account entitlement is checked by the selected CLI.
+_MODELS = {
+    "gpt-6.1-sol": ("codex", (*_COMMON_EFFORTS, "ultra")),
+    "gpt-6-astra": ("codex", (*_COMMON_EFFORTS, "ultra")),
+    "gpt-6-sol": ("codex", (*_COMMON_EFFORTS, "ultra")),
+    "gpt-6-luna": ("codex", _COMMON_EFFORTS),
+    "gpt-5.6-sol": ("codex", (*_COMMON_EFFORTS, "ultra")),
+    "gpt-5.6-terra": ("codex", (*_COMMON_EFFORTS, "ultra")),
+    "gpt-5.6-luna": ("codex", _COMMON_EFFORTS),
+    "claude-sonnet-5-5": ("claude", _COMMON_EFFORTS),
+    "claude-opus-5-5": ("claude", _COMMON_EFFORTS),
+}
 
 _REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
 _CODEX_CHILD_ENV_NAMES = ("HOME", "LANG", "LC_ALL", "PATH", "TERM", "TZ")
@@ -224,6 +238,33 @@ def _optional_reasoning_effort(payload: dict[str, Any]) -> str | None:
     return value.strip().lower()
 
 
+def _model_options(payload: dict[str, Any]) -> tuple[str, str, str]:
+    model = _require_str(payload, "model").strip()
+    if model not in _MODELS:
+        raise _bad_request("UNSUPPORTED_MODEL", "Use a model ID advertised by /v1/models")
+    provider, efforts = _MODELS[model]
+    if "provider" in payload and payload["provider"] != provider:
+        raise _bad_request("INVALID_PROVIDER", f"{model} requires provider={provider}")
+    effort = _optional_reasoning_effort(payload) or "medium"
+    if effort not in efforts:
+        raise _bad_request("UNSUPPORTED_EFFORT", f"{model} supports: {', '.join(efforts)}")
+    return model, provider, effort
+
+
+def _output_schema(payload: dict[str, Any]) -> dict[str, Any] | None:
+    response_format = payload.get("response_format")
+    if response_format is None:
+        return None
+    if not isinstance(response_format, dict):
+        raise _bad_request("INVALID_RESPONSE_FORMAT", "response_format must be an object")
+    if response_format.get("type") == "text":
+        return None
+    spec = response_format.get("json_schema")
+    if response_format.get("type") != "json_schema" or not isinstance(spec, dict) or not isinstance(spec.get("schema"), dict):
+        raise _bad_request("INVALID_RESPONSE_FORMAT", "Use response_format.type=json_schema with json_schema.schema")
+    return spec["schema"]
+
+
 def _build_prompt(messages: list[dict[str, Any]]) -> str:
     # Keep formatting deterministic and explicit.
     parts: list[str] = []
@@ -274,6 +315,7 @@ def _codex_exec_text(
     prompt: str,
     model: str,
     reasoning_effort: str | None = None,
+    schema_path: str | None = None,
     timeout_s: int = _DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS,
 ) -> _CodexExecResult:
     codex_path = shutil.which("codex")
@@ -303,6 +345,8 @@ def _codex_exec_text(
     ]
     if reasoning_effort:
         cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+    if schema_path:
+        cmd.extend(["--output-schema", schema_path])
     cmd.append("-")
 
     _LOGGER.info(
@@ -424,6 +468,64 @@ def _codex_exec_text(
     return _CodexExecResult(text=text, raw_json_events=events)
 
 
+def _claude_exec_text(*, request_id: str, prompt: str, model: str,
+                      reasoning_effort: str, schema: dict[str, Any] | None = None) -> _CodexExecResult:
+    executable = shutil.which("claude")
+    if executable is None:
+        raise _codex_exec_http_error(code="CLAUDE_NOT_FOUND", request_id=request_id,
+                                    model=model, detail_message="`claude` not found on PATH")
+    cmd = [executable, "--print", "--output-format", "json", "--model", model,
+           "--effort", reasoning_effort, "--no-session-persistence", "--tools", "",
+           "--permission-mode", "dontAsk", "--setting-sources", "",
+           "--settings", '{"disableAllHooks":true}', "--disable-slash-commands",
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-chrome"]
+    if schema is not None:
+        cmd.extend(["--json-schema", json.dumps(schema)])
+    env = _codex_child_env()
+    if config_dir := os.getenv("CLAUDE_CONFIG_DIR"):
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    try:
+        # Empty cwd prevents project instructions or source files entering completions.
+        with tempfile.TemporaryDirectory(prefix="bridge-claude-") as cwd:
+            proc = subprocess.run(cmd, input=prompt, text=True, cwd=cwd, env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  timeout=_DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
+                                    model=model, detail_message="Claude CLI failed or timed out") from exc
+    if proc.returncode:
+        # Do not publish auth URLs, tokens, or prompt content from CLI diagnostics.
+        raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
+                                    model=model, detail_message=f"Claude CLI exited {proc.returncode}")
+    try:
+        result = json.loads(proc.stdout)
+        if result.get("is_error"):
+            raise ValueError("Claude result is an error")
+        text = (json.dumps(result["structured_output"]) if schema is not None
+                else result["result"])
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("No completion")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise _codex_exec_http_error(code="CLAUDE_INVALID_RESPONSE", request_id=request_id,
+                                    model=model, detail_message="Claude returned no valid completion") from exc
+    return _CodexExecResult(text=text, raw_json_events=[result])
+
+
+def _cli_reply(*, request_id: str, prompt: str, model: str, provider: str,
+               reasoning_effort: str, schema: dict[str, Any] | None) -> _CodexExecResult:
+    if provider == "claude":
+        return _claude_exec_text(request_id=request_id, prompt=prompt, model=model,
+                                 reasoning_effort=reasoning_effort, schema=schema)
+    with tempfile.TemporaryDirectory(prefix="bridge-schema-") as directory:
+        schema_path = None
+        if schema is not None:
+            schema_path = os.path.join(directory, "output.json")
+            with open(schema_path, "w") as output:
+                json.dump(schema, output)
+        return _codex_exec_text(request_id=request_id, prompt=prompt, model=model,
+                                reasoning_effort=reasoning_effort, schema_path=schema_path)
+
+
 def _stream_chat_completion(
     *, model: str, completion_text: str, completion_id: str, created: int
 ) -> Iterable[bytes]:
@@ -468,7 +570,7 @@ def _stream_chat_completion(
 
 def create_app() -> FastAPI:
     """Create a small FastAPI app exposing a subset of the OpenAI API surface."""
-    app = FastAPI(title="Codex CLI OpenAI Proxy", version="0.1.0")
+    app = FastAPI(title="Codex and Claude CLI OpenAI Proxy", version="0.2.0")
 
     @app.get("/health", dependencies=[Depends(_require_bridge_api_key)])
     async def health() -> dict[str, str]:
@@ -481,17 +583,15 @@ def create_app() -> FastAPI:
             "object": "list",
             "data": [
                 {
-                    "id": "gpt-6-luna",
+                    "id": model,
                     "object": "model",
                     "created": now,
-                    "owned_by": "openai",
-                },
-                {
-                    "id": "gpt-6-sol",
-                    "object": "model",
-                    "created": now,
-                    "owned_by": "openai",
-                },
+                    "owned_by": "openai" if provider == "codex" else "anthropic",
+                    "provider": provider,
+                    "reasoning_efforts": list(efforts),
+                    "default_reasoning_effort": "medium",
+                }
+                for model, (provider, efforts) in _MODELS.items()
             ],
         }
 
@@ -512,21 +612,23 @@ def create_app() -> FastAPI:
             len(payload.get("messages", [])),
         )
 
-        model = _require_str(payload, "model").strip()
+        model, provider, reasoning_effort = _model_options(payload)
         messages = _require_messages(payload)
         stream = _optional_stream(payload)
-        reasoning_effort = _optional_reasoning_effort(payload)
+        schema = _output_schema(payload)
 
         prompt = _build_prompt(messages)
         completion_id = f"chatcmpl_{uuid.uuid4().hex}"
         created = int(time.time())
         try:
             result = await asyncio.to_thread(
-                _codex_exec_text,
+                _cli_reply,
                 request_id=request_id,
                 prompt=prompt,
                 model=model,
+                provider=provider,
                 reasoning_effort=reasoning_effort,
+                schema=schema,
             )
         except HTTPException:
             _LOGGER.warning(
@@ -545,8 +647,8 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=500,
                 detail={
-                    "code": "CODEX_EXEC_FAILED",
-                    "message": str(exc),
+                    "code": "CLI_EXEC_FAILED",
+                    "message": "Selected CLI failed",
                     "request_id": request_id,
                     "model": model,
                 },
@@ -578,6 +680,8 @@ def create_app() -> FastAPI:
             "object": "chat.completion",
             "created": created,
             "model": model,
+            "provider": provider,
+            "reasoning_effort": reasoning_effort,
             "choices": [
                 {
                     "index": 0,

@@ -10,7 +10,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Codex CLI (Linux).
-ARG CODEX_VERSION=0.156.1
+ARG CODEX_VERSION=0.161.0
 ARG TARGETARCH
 RUN set -eu; \
     ARCH_RAW="${TARGETARCH:-$(uname -m)}"; \
@@ -25,12 +25,30 @@ RUN set -eu; \
     chmod +x /usr/local/bin/codex; \
     /usr/local/bin/codex --version
 
+# Pinned native Claude CLI, verified against Anthropic's release manifest.
+ARG CLAUDE_VERSION=2.1.293
+RUN set -eu; \
+    case "${TARGETARCH:-$(uname -m)}" in \
+      amd64|x86_64) CLAUDE_PLATFORM="linux-x64" ;; \
+      arm64|aarch64) CLAUDE_PLATFORM="linux-arm64" ;; \
+      *) exit 1 ;; \
+    esac; \
+    RELEASE="https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}"; \
+    curl -fsSL "${RELEASE}/manifest.json" -o /tmp/claude-manifest.json; \
+    curl -fsSL "${RELEASE}/${CLAUDE_PLATFORM}/claude" -o /usr/local/bin/claude; \
+    python -c 'import hashlib,json,sys; expected=json.load(open("/tmp/claude-manifest.json"))["platforms"][sys.argv[1]]["checksum"]; actual=hashlib.file_digest(open("/usr/local/bin/claude","rb"),"sha256").hexdigest(); assert actual==expected, "Claude checksum mismatch"' "${CLAUDE_PLATFORM}"; \
+    chmod +x /usr/local/bin/claude; \
+    rm /tmp/claude-manifest.json; \
+    /usr/local/bin/claude --version
+
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 RUN useradd -m -u 10001 app
 USER app
-ENV HOME=/home/app
+ENV HOME=/home/app \
+    CLAUDE_CONFIG_DIR=/home/app/.claude \
+    DISABLE_AUTOUPDATER=1
 
 COPY --chown=app:app app.py /app/app.py
 
