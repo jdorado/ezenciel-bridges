@@ -19,10 +19,12 @@ RUN set -eu; \
       arm64|aarch64) CODEX_ASSET_ARCH="aarch64" ;; \
       *) echo "Unsupported architecture: ${ARCH_RAW} (expected: amd64/x86_64 or arm64/aarch64)"; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/codex.zst "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${CODEX_ASSET_ARCH}-unknown-linux-musl.zst"; \
-    zstd -d /tmp/codex.zst -o /usr/local/bin/codex; \
-    rm -f /tmp/codex.zst; \
-    chmod +x /usr/local/bin/codex; \
+    for BINARY in codex codex-code-mode-host; do \
+      curl -fsSL -o "/tmp/${BINARY}.zst" "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/${BINARY}-${CODEX_ASSET_ARCH}-unknown-linux-musl.zst"; \
+      zstd -d "/tmp/${BINARY}.zst" -o "/usr/local/bin/${BINARY}"; \
+      rm -f "/tmp/${BINARY}.zst"; \
+      chmod +x "/usr/local/bin/${BINARY}"; \
+    done; \
     /usr/local/bin/codex --version
 
 # Pinned native Claude CLI, verified against Anthropic's release manifest.
