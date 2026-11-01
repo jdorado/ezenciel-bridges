@@ -226,6 +226,13 @@ def _optional_stream(payload: dict[str, Any]) -> bool:
     raise _bad_request("INVALID_REQUEST", "stream must be a boolean")
 
 
+def _optional_web_search(payload: dict[str, Any]) -> bool:
+    value = payload.get("web_search", False)
+    if not isinstance(value, bool):
+        raise _bad_request("INVALID_REQUEST", "web_search must be a boolean")
+    return value
+
+
 def _optional_reasoning_effort(payload: dict[str, Any]) -> str | None:
     value = payload.get("reasoning_effort")
     if value is None:
@@ -316,6 +323,7 @@ def _codex_exec_text(
     model: str,
     reasoning_effort: str | None = None,
     schema_path: str | None = None,
+    web_search: bool = False,
     timeout_s: int = _DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS,
 ) -> _CodexExecResult:
     codex_path = shutil.which("codex")
@@ -345,6 +353,8 @@ def _codex_exec_text(
     ]
     if reasoning_effort:
         cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+    if web_search:
+        cmd.extend(["-c", 'web_search="live"', "-c", "features.shell_tool=false"])
     if schema_path:
         cmd.extend(["--output-schema", schema_path])
     cmd.append("-")
@@ -469,16 +479,19 @@ def _codex_exec_text(
 
 
 def _claude_exec_text(*, request_id: str, prompt: str, model: str,
-                      reasoning_effort: str, schema: dict[str, Any] | None = None) -> _CodexExecResult:
+                      reasoning_effort: str, schema: dict[str, Any] | None = None,
+                      web_search: bool = False) -> _CodexExecResult:
     executable = shutil.which("claude")
     if executable is None:
         raise _codex_exec_http_error(code="CLAUDE_NOT_FOUND", request_id=request_id,
                                     model=model, detail_message="`claude` not found on PATH")
     cmd = [executable, "--print", "--output-format", "json", "--model", model,
-           "--effort", reasoning_effort, "--no-session-persistence", "--tools", "",
+           "--effort", reasoning_effort, "--no-session-persistence", "--tools", "WebSearch,WebFetch" if web_search else "",
            "--permission-mode", "dontAsk", "--setting-sources", "",
            "--settings", '{"disableAllHooks":true}', "--disable-slash-commands",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-chrome"]
+    if web_search:
+        cmd.extend(["--allowedTools", "WebSearch,WebFetch"])
     if schema is not None:
         cmd.extend(["--json-schema", json.dumps(schema)])
     env = _codex_child_env()
@@ -515,10 +528,11 @@ def _claude_exec_text(*, request_id: str, prompt: str, model: str,
 
 
 def _cli_reply(*, request_id: str, prompt: str, model: str, provider: str,
-               reasoning_effort: str, schema: dict[str, Any] | None) -> _CodexExecResult:
+               reasoning_effort: str, schema: dict[str, Any] | None,
+               web_search: bool = False) -> _CodexExecResult:
     if provider == "claude":
         return _claude_exec_text(request_id=request_id, prompt=prompt, model=model,
-                                 reasoning_effort=reasoning_effort, schema=schema)
+                                 reasoning_effort=reasoning_effort, schema=schema, web_search=web_search)
     with tempfile.TemporaryDirectory(prefix="bridge-schema-") as directory:
         schema_path = None
         if schema is not None:
@@ -526,7 +540,7 @@ def _cli_reply(*, request_id: str, prompt: str, model: str, provider: str,
             with open(schema_path, "w") as output:
                 json.dump(schema, output)
         return _codex_exec_text(request_id=request_id, prompt=prompt, model=model,
-                                reasoning_effort=reasoning_effort, schema_path=schema_path)
+                                reasoning_effort=reasoning_effort, schema_path=schema_path, web_search=web_search)
 
 
 def _stream_chat_completion(
@@ -618,6 +632,7 @@ def create_app() -> FastAPI:
         model, provider, reasoning_effort = _model_options(payload)
         messages = _require_messages(payload)
         stream = _optional_stream(payload)
+        web_search = _optional_web_search(payload)
         schema = _output_schema(payload)
 
         prompt = _build_prompt(messages)
@@ -632,6 +647,7 @@ def create_app() -> FastAPI:
                 provider=provider,
                 reasoning_effort=reasoning_effort,
                 schema=schema,
+                web_search=web_search,
             )
         except HTTPException:
             _LOGGER.warning(

@@ -49,6 +49,18 @@ import app
 
 
 class TestCodexExecText(unittest.TestCase):
+    def test_live_web_access_keeps_read_only_sandbox_and_disables_shell(self):
+        completed = subprocess.CompletedProcess(['codex'], 0,
+            stdout='{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}\n')
+        with patch('app.shutil.which', return_value='/usr/local/bin/codex'), \
+             patch('app.subprocess.run', return_value=completed) as run:
+            app._codex_exec_text(request_id='web', prompt='Read a public page',
+                                 model='gpt-6.1-sol', web_search=True)
+        cmd = run.call_args.args[0]
+        self.assertIn('web_search="live"', cmd)
+        self.assertIn('features.shell_tool=false', cmd)
+        self.assertEqual(cmd[cmd.index('--sandbox') + 1], 'read-only')
+
     def test_prompt_is_sent_via_stdin_instead_of_argv(self) -> None:
         prompt = "USER:\nhello\n" * 2000
         completed = subprocess.CompletedProcess(
@@ -124,6 +136,14 @@ if __name__ == "__main__":
     unittest.main()
 
 class TestModelContract(unittest.TestCase):
+    def test_web_access_requires_an_explicit_boolean(self):
+        self.assertFalse(app._optional_web_search({}))
+        self.assertFalse(app._optional_web_search({'web_search': False}))
+        self.assertTrue(app._optional_web_search({'web_search': True}))
+        for value in ('true', 1, None, {}, []):
+            with self.subTest(value=value), self.assertRaises(app.HTTPException):
+                app._optional_web_search({'web_search': value})
+
     def test_model_selects_cli_and_default_effort(self):
         self.assertEqual(app._model_options({'model': 'gpt-6.1-sol'}),
                          ('gpt-6.1-sol', 'codex', 'medium'))
@@ -149,11 +169,12 @@ class TestModelContract(unittest.TestCase):
         schema_paths = []
         def reply(**kwargs):
             schema_paths.append(kwargs['schema_path'])
+            self.assertTrue(kwargs['web_search'])
             self.assertEqual(json.loads(pathlib.Path(kwargs['schema_path']).read_text()), schema)
             return app._CodexExecResult('ok', [])
         with patch('app._codex_exec_text', side_effect=reply), patch('app._claude_exec_text') as claude:
             app._cli_reply(request_id='schema', prompt='hello', model='gpt-6.1-sol',
-                           provider='codex', reasoning_effort='medium', schema=schema)
+                           provider='codex', reasoning_effort='medium', schema=schema, web_search=True)
         claude.assert_not_called()
         self.assertFalse(pathlib.Path(schema_paths[0]).exists())
 
@@ -176,6 +197,21 @@ class TestModelContract(unittest.TestCase):
         self.assertNotIn('private prompt', cmd)
         self.assertEqual(run.call_args.kwargs['input'], 'private prompt')
         self.assertNotIn('BRIDGE_API_KEY', run.call_args.kwargs['env'])
+
+    def test_claude_web_access_exposes_and_approves_only_web_tools(self):
+        import json
+        completed = subprocess.CompletedProcess(['claude'], 0,
+            stdout=json.dumps({'is_error': False, 'result': 'Read the roaster page.'}))
+        with patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
+             patch('app.subprocess.run', return_value=completed) as run:
+            app._cli_reply(request_id='web', prompt='Read a public page',
+                model='claude-sonnet-5-5', provider='claude', reasoning_effort='medium',
+                schema=None, web_search=True)
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index('--tools') + 1], 'WebSearch,WebFetch')
+        self.assertEqual(cmd[cmd.index('--allowedTools') + 1], 'WebSearch,WebFetch')
+        self.assertEqual(cmd[cmd.index('--permission-mode') + 1], 'dontAsk')
+        self.assertEqual(json.loads(cmd[cmd.index('--mcp-config') + 1]), {'mcpServers': {}})
 
     def test_claude_error_is_not_a_success_or_secret_disclosure(self):
         completed = subprocess.CompletedProcess(['claude'], 1, stdout='secret', stderr='secret')

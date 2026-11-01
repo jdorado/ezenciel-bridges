@@ -32,8 +32,16 @@ the bridge passes the schema to each CLI's native output option. Claude's
 `structured_output` becomes the JSON string in `choices[0].message.content`.
 Non-streamed responses also report the selected provider and effort. Streaming
 still emits chunks after the CLI finishes; it is not live CLI token streaming.
-Other generation parameters are ignored. Claude completions disable tools,
-hooks, project/user settings, skills, Chrome and MCP, and do not persist sessions.
+Set `"web_search": true` to allow native live web search and page retrieval for
+that request. Codex uses `web_search="live"` with shell tools disabled and its
+existing read-only sandbox. Claude enables and pre-approves only `WebSearch`
+and `WebFetch`. Omitting the field preserves the existing CLI behavior (Codex's
+configured search default; no tools for Claude). The field must be a boolean.
+Structured output remains available with web access; ask for Markdown source
+links in the reply when the consuming UI does not render native citations.
+
+Other generation parameters are ignored. Claude completions disable hooks,
+project/user settings, skills, Chrome and MCP, and do not persist sessions.
 
 Endpoints:
 
