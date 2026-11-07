@@ -213,6 +213,34 @@ class TestModelContract(unittest.TestCase):
         self.assertEqual(cmd[cmd.index('--permission-mode') + 1], 'dontAsk')
         self.assertEqual(json.loads(cmd[cmd.index('--mcp-config') + 1]), {'mcpServers': {}})
 
+    def test_claude_long_lived_token_file_reaches_only_the_claude_child(self):
+        import json, os, tempfile
+        completed = subprocess.CompletedProcess(['claude'], 0, stdout=json.dumps({'is_error': False, 'result': 'ok'}))
+        token = 'sk-ant-oat01-' + 'a' * 40
+        with tempfile.TemporaryDirectory() as home:
+            with open(os.path.join(home, 'oauth-token'), 'w') as handle:
+                handle.write(token + '\n')
+            with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': home}), \
+                 patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
+                 patch('app.subprocess.run', return_value=completed) as run:
+                app._claude_exec_text(request_id='t', prompt='hi', model='claude-sonnet-5-5', reasoning_effort='medium')
+        self.assertEqual(run.call_args.kwargs['env']['CLAUDE_CODE_OAUTH_TOKEN'], token)
+        self.assertNotIn(token, run.call_args.args[0])
+        self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', app._codex_child_env())
+
+    def test_claude_malformed_token_file_fails_closed_without_leaking_it(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as home:
+            with open(os.path.join(home, 'oauth-token'), 'w') as handle:
+                handle.write('sk-ant-oat01-split\nacross-lines-secret')
+            with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': home}), \
+                 patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
+                 patch('app.subprocess.run') as run, \
+                 self.assertRaises(app.HTTPException) as caught:
+                app._claude_exec_text(request_id='t', prompt='hi', model='claude-sonnet-5-5', reasoning_effort='medium')
+        run.assert_not_called()
+        self.assertNotIn('secret', str(caught.exception.detail))
+
     def test_claude_error_is_not_a_success_or_secret_disclosure(self):
         completed = subprocess.CompletedProcess(['claude'], 1, stdout='secret', stderr='secret')
         with patch('app.shutil.which', return_value='/usr/local/bin/claude'), \

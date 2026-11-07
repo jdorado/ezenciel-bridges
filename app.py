@@ -17,6 +17,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -87,6 +88,26 @@ def _codex_child_env() -> dict[str, str]:
         for name in _CODEX_CHILD_ENV_NAMES
         if (value := os.getenv(name)) is not None
     }
+
+
+_CLAUDE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._-]{20,512}")
+
+
+def _claude_oauth_token() -> str | None:
+    """Return the owner-provisioned long-lived token (`claude setup-token`) from the Claude config volume.
+
+    The token never refreshes, so one file can be shared across agents without
+    invalidating the others' sessions. Absent file: use the volume's own login.
+    """
+    config_dir = os.getenv("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    try:
+        with open(os.path.join(config_dir, "oauth-token"), encoding="utf-8") as handle:
+            token = handle.read().strip()
+    except FileNotFoundError:
+        return None
+    if not _CLAUDE_TOKEN_PATTERN.fullmatch(token):
+        raise ValueError("Invalid Claude token binding")
+    return token
 
 
 def _truncate(text: str, *, max_chars: int = _CODEX_FAILURE_LOG_LIMIT) -> str:
@@ -498,6 +519,12 @@ def _claude_exec_text(*, request_id: str, prompt: str, model: str,
     env["DISABLE_AUTOUPDATER"] = "1"
     if config_dir := os.getenv("CLAUDE_CONFIG_DIR"):
         env["CLAUDE_CONFIG_DIR"] = config_dir
+    try:
+        if token := _claude_oauth_token():
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    except (OSError, ValueError) as exc:
+        raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
+                                    model=model, detail_message="Invalid Claude token binding") from exc
     try:
         # Empty cwd prevents project instructions or source files entering completions.
         with tempfile.TemporaryDirectory(prefix="bridge-claude-") as cwd:
