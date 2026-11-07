@@ -7,7 +7,10 @@ Small, Docker-friendly "bridge" services used across ezenciel projects.
 OpenAI-compatible HTTP proxy that fulfills chat-completions with Codex or Claude
 CLI. The full model ID selects exactly one CLI, without provider fallback.
 
-The image pins Codex `0.161.0` and Claude Code `2.1.293`. Authenticated clients
+The image pins Codex and its required code-mode host to `0.161.0`, and Claude
+Code to `2.1.293`. The host is installed beside Codex so native tools can run;
+installing the CLI executable alone permits text replies but fails tool calls.
+Authenticated clients
 discover the reviewed model IDs, provider and allowed efforts from `GET /v1/models`.
 Supported families: GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna,
 Claude Sonnet 5.5 and Opus 5.5. Listing a model does not establish account access.
@@ -32,8 +35,16 @@ the bridge passes the schema to each CLI's native output option. Claude's
 `structured_output` becomes the JSON string in `choices[0].message.content`.
 Non-streamed responses also report the selected provider and effort. Streaming
 still emits chunks after the CLI finishes; it is not live CLI token streaming.
-Other generation parameters are ignored. Claude completions disable tools,
-hooks, project/user settings, skills, Chrome and MCP, and do not persist sessions.
+Set `"web_search": true` to allow native live web search and page retrieval for
+that request. Codex uses `web_search="live"` with shell tools disabled and its
+existing read-only sandbox. Claude enables and pre-approves only `WebSearch`
+and `WebFetch`. Omitting the field preserves the existing CLI behavior (Codex's
+configured search default; no tools for Claude). The field must be a boolean.
+Structured output remains available with web access; ask for Markdown source
+links in the reply when the consuming UI does not render native citations.
+
+Other generation parameters are ignored. Claude completions disable hooks,
+project/user settings, skills, Chrome and MCP, and do not persist sessions.
 
 Endpoints:
 
