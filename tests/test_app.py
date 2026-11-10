@@ -149,6 +149,8 @@ class TestModelContract(unittest.TestCase):
                          ('gpt-6.1-sol', 'codex', 'medium'))
         self.assertEqual(app._model_options({'model': 'claude-sonnet-5-5', 'reasoning_effort': 'high'}),
                          ('claude-sonnet-5-5', 'claude', 'high'))
+        self.assertEqual(app._model_options({'model': 'claude-fable-5-2'}),
+                         ('claude-fable-5-2', 'claude', 'medium'))
 
     def test_invalid_combinations_are_rejected_before_execution(self):
         for payload in (
