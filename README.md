@@ -13,7 +13,7 @@ installing the CLI executable alone permits text replies but fails tool calls.
 Authenticated clients
 discover the reviewed model IDs, provider and allowed efforts from `GET /v1/models`.
 Supported families: GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna,
-Claude Sonnet 5.5, Opus 5.5 and Fable 5.2. Listing a model does not establish account access.
+Claude Sonnet 5.5 and Opus 5.5. Listing a model does not establish account access.
 
 Each request requires `model` and `messages`. `reasoning_effort` defaults to
 `medium`; an optional `provider` must match `codex` or `claude` for that model.
