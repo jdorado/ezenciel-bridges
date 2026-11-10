@@ -50,7 +50,6 @@ _MODELS = {
     "gpt-5.6-luna": ("codex", _COMMON_EFFORTS),
     "claude-sonnet-5-5": ("claude", _COMMON_EFFORTS),
     "claude-opus-5-5": ("claude", _COMMON_EFFORTS),
-    "claude-fable-5-2": ("claude", _COMMON_EFFORTS),
 }
 
 _REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
