@@ -28,7 +28,7 @@ RUN set -eu; \
     /usr/local/bin/codex --version
 
 # Pinned native Claude CLI, verified against Anthropic's release manifest.
-ARG CLAUDE_VERSION=2.1.293
+ARG CLAUDE_VERSION=2.1.322
 RUN set -eu; \
     case "${TARGETARCH:-$(uname -m)}" in \
       amd64|x86_64) CLAUDE_PLATFORM="linux-x64" ;; \
