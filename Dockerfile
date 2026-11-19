@@ -10,7 +10,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Codex CLI (Linux).
-ARG CODEX_VERSION=0.161.0
+ARG CODEX_VERSION=0.170.0
 ARG TARGETARCH
 RUN set -eu; \
     ARCH_RAW="${TARGETARCH:-$(uname -m)}"; \

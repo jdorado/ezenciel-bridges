@@ -18,7 +18,7 @@ and the bridge owns the models:
 `GET /v1/models` lists the table under `levels`. Other efforts need a named model.
 The response reports the model, provider and effort that served the request.
 
-The image pins Codex and its required code-mode host to `0.161.0`, and Claude
+The image pins Codex and its required code-mode host to `0.170.0` (GPT-6.2 Sol is not offered to older clients), and Claude
 Code to `2.1.322`. The host is installed beside Codex so native tools can run;
 installing the CLI executable alone permits text replies but fails tool calls.
 Authenticated clients
