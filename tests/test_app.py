@@ -183,6 +183,7 @@ class TestModelContract(unittest.TestCase):
         schema = {'type': 'object', 'properties': {'reply': {'type': 'string'}}}
         completed = subprocess.CompletedProcess(['claude'], 0,
             stdout=json.dumps({'is_error': False, 'structured_output': {'reply': 'ok'}}))
+        self.tokens.start(); self.addCleanup(self.tokens.stop)
         with patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
              patch('app.subprocess.run', return_value=completed) as run:
             result = app._claude_exec_text(request_id='claude', prompt='private prompt',
@@ -202,6 +203,7 @@ class TestModelContract(unittest.TestCase):
         import json
         completed = subprocess.CompletedProcess(['claude'], 0,
             stdout=json.dumps({'is_error': False, 'result': 'Read the roaster page.'}))
+        self.tokens.start(); self.addCleanup(self.tokens.stop)
         with patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
              patch('app.subprocess.run', return_value=completed) as run:
             app._cli_reply(request_id='web', prompt='Read a public page',
@@ -213,36 +215,129 @@ class TestModelContract(unittest.TestCase):
         self.assertEqual(cmd[cmd.index('--permission-mode') + 1], 'dontAsk')
         self.assertEqual(json.loads(cmd[cmd.index('--mcp-config') + 1]), {'mcpServers': {}})
 
-    def test_claude_long_lived_token_file_reaches_only_the_claude_child(self):
-        import json, os, tempfile
-        completed = subprocess.CompletedProcess(['claude'], 0, stdout=json.dumps({'is_error': False, 'result': 'ok'}))
-        token = 'sk-ant-oat01-' + 'a' * 40
-        with tempfile.TemporaryDirectory() as home:
-            with open(os.path.join(home, 'oauth-token'), 'w') as handle:
+    def _claude_home(self, tokens):
+        import os, tempfile
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        os.makedirs(os.path.join(home.name, 'oauth-tokens'))
+        for account, token in tokens.items():
+            with open(os.path.join(home.name, 'oauth-tokens', account), 'w') as handle:
                 handle.write(token + '\n')
-            with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': home}), \
-                 patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
-                 patch('app.subprocess.run', return_value=completed) as run:
-                app._claude_exec_text(request_id='t', prompt='hi', model='claude-sonnet-5-5', reasoning_effort='medium')
-        self.assertEqual(run.call_args.kwargs['env']['CLAUDE_CODE_OAUTH_TOKEN'], token)
-        self.assertNotIn(token, run.call_args.args[0])
+        return home.name
+
+    def _claude_call(self, home, *outputs):
+        """Run one Claude completion against canned CLI outputs; return the tokens the CLI saw."""
+        import os
+        seen = []
+        def run(cmd, **kwargs):
+            seen.append(kwargs['env']['CLAUDE_CODE_OAUTH_TOKEN'])
+            return outputs[len(seen) - 1]
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': home}), \
+             patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
+             patch('app.subprocess.run', side_effect=run):
+            try:
+                result = app._claude_exec_text(request_id='t', prompt='hi', model='claude-sonnet-5-5',
+                                               reasoning_effort='medium')
+            except app.HTTPException as error:
+                return seen, error
+        return seen, result
+
+    @staticmethod
+    def _claude_out(returncode=0, **fields):
+        import json
+        body = {'is_error': False, 'result': 'ok', **fields}
+        return subprocess.CompletedProcess(['claude'], returncode, stdout=json.dumps(body))
+
+    def setUp(self):
+        app._CLAUDE_ACCOUNTS = app._ClaudeAccounts()
+        self.tokens = patch('app._claude_tokens', return_value={'test': 'sk-ant-oat01-' + 't' * 40})
+
+    def test_claude_long_lived_token_file_reaches_only_the_claude_child(self):
+        token = 'sk-ant-oat01-' + 'a' * 40
+        seen, result = self._claude_call(self._claude_home({'sofi': token}), self._claude_out())
+        self.assertEqual(seen, [token])
+        self.assertEqual(result.text, 'ok')
         self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', app._codex_child_env())
 
-    def test_claude_malformed_token_file_fails_closed_without_leaking_it(self):
-        import os, tempfile
-        with tempfile.TemporaryDirectory() as home:
-            with open(os.path.join(home, 'oauth-token'), 'w') as handle:
-                handle.write('sk-ant-oat01-split\nacross-lines-secret')
-            with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': home}), \
-                 patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
-                 patch('app.subprocess.run') as run, \
-                 self.assertRaises(app.HTTPException) as caught:
-                app._claude_exec_text(request_id='t', prompt='hi', model='claude-sonnet-5-5', reasoning_effort='medium')
-        run.assert_not_called()
-        self.assertNotIn('secret', str(caught.exception.detail))
+    def test_claude_malformed_token_is_skipped_without_leaking_it(self):
+        good = 'sk-ant-oat01-' + 'g' * 40
+        home = self._claude_home({'bad': 'sk-ant-oat01-split\nacross-lines-secret', 'good': good})
+        with self.assertLogs('codex-bridge', 'WARNING') as logs:
+            seen, result = self._claude_call(home, self._claude_out())
+        self.assertEqual(seen, [good])
+        self.assertNotIn('secret', ''.join(logs.output))
+
+    def test_claude_without_any_token_fails_before_running_the_cli(self):
+        seen, error = self._claude_call(self._claude_home({}))
+        self.assertEqual(seen, [])
+        self.assertEqual(error.status_code, 500)
+
+    def test_claude_accounts_rotate_least_recently_used(self):
+        tokens = {name: 'sk-ant-oat01-' + name * 40 for name in 'abc'}
+        home = self._claude_home(tokens)
+        seen = []
+        for _ in range(4):
+            calls, _ = self._claude_call(home, self._claude_out())
+            seen += calls
+        self.assertEqual(seen, [tokens[name] for name in 'abca'])
+
+    def test_claude_limited_account_is_skipped_and_cooled(self):
+        tokens = {name: 'sk-ant-oat01-' + name * 40 for name in 'ab'}
+        home = self._claude_home(tokens)
+        limited = self._claude_out(1, is_error=True, api_error_status=429,
+                                   result="You've hit your weekly limit · resets Nov 20, 5am (UTC)")
+        with self.assertLogs('codex-bridge', 'WARNING') as logs:
+            seen, result = self._claude_call(home, limited, self._claude_out())
+        self.assertEqual(seen, [tokens['a'], tokens['b']])
+        self.assertEqual(result.text, 'ok')
+        self.assertIn('account=a status=429', ''.join(logs.output))
+        self.assertIn('weekly limit', ''.join(logs.output))
+        for token in tokens.values():
+            self.assertNotIn(token, ''.join(logs.output))
+        # The limited account stays out of rotation until its cooldown ends.
+        seen, _ = self._claude_call(home, self._claude_out())
+        self.assertEqual(seen, [tokens['b']])
+
+    def test_claude_rejected_token_is_skipped_but_other_errors_are_not_retried(self):
+        tokens = {name: 'sk-ant-oat01-' + name * 40 for name in 'ab'}
+        home = self._claude_home(tokens)
+        rejected = self._claude_out(1, is_error=True, api_error_status=401, result='OAuth access token is invalid.')
+        seen, result = self._claude_call(home, rejected, self._claude_out())
+        self.assertEqual(seen, [tokens['a'], tokens['b']])
+        broken = self._claude_out(1, is_error=True, api_error_status=500, result='boom')
+        seen, error = self._claude_call(self._claude_home(tokens), broken)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(error.status_code, 500)
+
+    def test_claude_all_accounts_limited_raises_exhausted_without_generating(self):
+        tokens = {name: 'sk-ant-oat01-' + name * 40 for name in 'ab'}
+        limited = self._claude_out(1, is_error=True, api_error_status=429, result='limit')
+        seen, error = self._claude_call(self._claude_home(tokens), limited, limited)
+        self.assertEqual(len(seen), 2)
+        self.assertIsInstance(error, app._Exhausted)
+        self.assertEqual(error.status_code, 503)
+
+    def test_level_selects_models_and_effort_without_a_model(self):
+        self.assertEqual(app._requested_routes({}),
+                         [('claude-sonnet-5-5', 'claude', 'medium'), ('gpt-6.2-sol', 'codex', 'medium')])
+        self.assertEqual(app._requested_routes({'model': 'auto', 'reasoning_effort': 'low'}),
+                         [('claude-sonnet-5-5', 'claude', 'low'), ('gpt-6.2-sol', 'codex', 'low')])
+        self.assertEqual(app._requested_routes({'reasoning_effort': 'high'}),
+                         [('claude-opus-5-5', 'claude', 'high'), ('gpt-6.2-sol', 'codex', 'high')])
+        self.assertEqual(app._requested_routes({'model': 'gpt-6.1-sol'}), [('gpt-6.1-sol', 'codex', 'medium')])
+
+    def test_level_requests_reject_unlisted_levels_and_providers(self):
+        for payload in ({'reasoning_effort': 'max'}, {'reasoning_effort': 'none'}, {'provider': 'claude'}):
+            with self.subTest(payload=payload), self.assertRaises(app.HTTPException) as error:
+                app._requested_routes(payload)
+            self.assertEqual(error.exception.status_code, 400)
+        for routes in app._LEVEL_ROUTES.values():
+            for model, effort in routes:
+                self.assertIn(effort, app._MODELS[model][1])
 
     def test_claude_error_is_not_a_success_or_secret_disclosure(self):
         completed = subprocess.CompletedProcess(['claude'], 1, stdout='secret', stderr='secret')
+        self.tokens.start(); self.addCleanup(self.tokens.stop)
         with patch('app.shutil.which', return_value='/usr/local/bin/claude'), \
              patch('app.subprocess.run', return_value=completed), \
              self.assertRaises(app.HTTPException) as error:
