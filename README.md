@@ -5,7 +5,18 @@ Small, Docker-friendly "bridge" services used across ezenciel projects.
 ## codex-openai-proxy
 
 OpenAI-compatible HTTP proxy that fulfills chat-completions with Codex or Claude
-CLI. The full model ID selects exactly one CLI, without provider fallback.
+CLI. A full model ID selects exactly one CLI. Callers that send no `model` (or
+`model: "auto"`) pick a level, `low`, `medium` or `high` in `reasoning_effort`,
+and the bridge owns the models:
+
+| Level | Claude (rotates across accounts) | Codex (only if every Claude account is out) |
+| --- | --- | --- |
+| `low` | `claude-sonnet-5-5`, low | `gpt-6.2-sol`, low |
+| `medium` (default) | `claude-sonnet-5-5`, medium | `gpt-6.2-sol`, medium |
+| `high` | `claude-opus-5-5`, high | `gpt-6.2-sol`, high |
+
+`GET /v1/models` lists the table under `levels`. Other efforts need a named model.
+The response reports the model, provider and effort that served the request.
 
 The image pins Codex and its required code-mode host to `0.161.0`, and Claude
 Code to `2.1.322`. The host is installed beside Codex so native tools can run;
@@ -15,7 +26,7 @@ discover the reviewed model IDs, provider and allowed efforts from `GET /v1/mode
 Supported families: GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna,
 Claude Sonnet 5.5 and Opus 5.5. Listing a model does not establish account access.
 
-Each request requires `model` and `messages`. `reasoning_effort` defaults to
+Each request requires `messages`; `model` is optional (see levels). `reasoning_effort` defaults to
 `medium`; an optional `provider` must match `codex` or `claude` for that model.
 Both providers support `low`, `medium`, `high`, `xhigh`, `max`; the advertised
 Codex models additionally support `ultra` where available. Unsupported models
@@ -76,6 +87,14 @@ than an ordinary application password.
   `ezenciel-bridges-private:current` and recreate that service from its private
   Compose file sourced from `compose.vm.yml`; `compose.yml` is for local use only. Merging this
   repository runs verification, not deployment.
+- Claude accounts: one long-lived `claude setup-token` file per account in
+  `/home/app/.claude/oauth-tokens/<account>` (mode 600, UID 10001), written by
+  `ez/infrastructure/claude-token-sync/sync-tokens.py`. Each request takes the
+  least-recently-used account. A 429 (limit) or 401/403 (rejected token) before
+  any output cools that account for 30 minutes and the request moves to the next
+  one; when all are cooling the request gets HTTP 503 `CLAUDE_ACCOUNTS_EXHAUSTED`
+  (a level request then tries its Codex route). The cause is logged by account
+  name, never by token or prompt. Cooldown state is in memory.
 - Claude login uses a separate `claude_config` volume mounted at
   `/home/app/.claude` (`CLAUDE_CONFIG_DIR`). Initialize a new volume's ownership
   to UID/GID 10001 before login. Never mount a Mac keychain or copy an API-key

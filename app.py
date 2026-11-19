@@ -6,8 +6,11 @@ HTTP endpoint while the underlying "model" call is performed by spawning
 not argv, so large message payloads do not hit the OS argument-length limit.
 
 Design constraints:
-- No fallbacks and no silent retries: one subprocess call per request.
-- Model selects one CLI; validate effort and pass native output schemas without retries.
+- One generating subprocess call per request. The only retry is on a quota or credential
+  rejection (HTTP 429/401/403) that happens before any output: the next Claude account,
+  then (level requests only) the Codex route.
+- A named model selects one CLI; no model selects a level's routes. Validate effort and pass
+  native output schemas.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -41,6 +45,7 @@ _REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"
 _COMMON_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Reviewed CLI model IDs. Account entitlement is checked by the selected CLI.
 _MODELS = {
+    "gpt-6.2-sol": ("codex", (*_COMMON_EFFORTS, "ultra")),
     "gpt-6.1-sol": ("codex", (*_COMMON_EFFORTS, "ultra")),
     "gpt-6-astra": ("codex", (*_COMMON_EFFORTS, "ultra")),
     "gpt-6-sol": ("codex", (*_COMMON_EFFORTS, "ultra")),
@@ -51,6 +56,16 @@ _MODELS = {
     "claude-sonnet-5-5": ("claude", _COMMON_EFFORTS),
     "claude-opus-5-5": ("claude", _COMMON_EFFORTS),
 }
+# Callers that send no model (or "auto") pick a level; the bridge owns the models.
+# Routes are tried in order; a route moves on only when every account of its
+# provider is out of quota or rejected.
+_LEVEL_ROUTES = {
+    "low": (("claude-sonnet-5-5", "low"), ("gpt-6.2-sol", "low")),
+    "medium": (("claude-sonnet-5-5", "medium"), ("gpt-6.2-sol", "medium")),
+    "high": (("claude-opus-5-5", "high"), ("gpt-6.2-sol", "high")),
+}
+_CLAUDE_LIMIT_STATUSES = frozenset({401, 403, 429})
+_CLAUDE_ACCOUNT_COOLDOWN_SECONDS = 1800
 
 _REQUIRED_BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
 _CODEX_CHILD_ENV_NAMES = ("HOME", "LANG", "LC_ALL", "PATH", "TERM", "TZ")
@@ -93,21 +108,66 @@ def _codex_child_env() -> dict[str, str]:
 _CLAUDE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._-]{20,512}")
 
 
-def _claude_oauth_token() -> str | None:
-    """Return the owner-provisioned long-lived token (`claude setup-token`) from the Claude config volume.
+_CLAUDE_ACCOUNT_LABEL = re.compile(r"[A-Za-z0-9_-]{1,40}")
 
-    The token never refreshes, so one file can be shared across agents without
-    invalidating the others' sessions. Absent file: use the volume's own login.
+
+class _Exhausted(HTTPException):
+    """Every account of a provider is out of quota or rejected; nothing was generated."""
+
+
+def _claude_tokens() -> dict[str, str]:
+    """Return the owner-provisioned long-lived tokens (`claude setup-token`), one file per account.
+
+    Files live in <CLAUDE_CONFIG_DIR>/oauth-tokens/<account>. Tokens never
+    refresh, so the same file can serve many agents without invalidating their
+    sessions. A malformed file is skipped and reported by account name only.
     """
     config_dir = os.getenv("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    directory = os.path.join(config_dir, "oauth-tokens")
     try:
-        with open(os.path.join(config_dir, "oauth-token"), encoding="utf-8") as handle:
-            token = handle.read().strip()
+        names = sorted(os.listdir(directory))
     except FileNotFoundError:
-        return None
-    if not _CLAUDE_TOKEN_PATTERN.fullmatch(token):
-        raise ValueError("Invalid Claude token binding")
-    return token
+        return {}
+    tokens: dict[str, str] = {}
+    for name in names:
+        if not _CLAUDE_ACCOUNT_LABEL.fullmatch(name):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError:
+            continue
+        if _CLAUDE_TOKEN_PATTERN.fullmatch(token):
+            tokens[name] = token
+        else:
+            _LOGGER.warning("claude_token_invalid account=%s", name)
+    return tokens
+
+
+class _ClaudeAccounts:
+    """Least-recently-used rotation with a cooldown for accounts that hit a limit."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_used: dict[str, float] = {}
+        self._cooldown_until: dict[str, float] = {}
+
+    def acquire(self, names: Iterable[str]) -> str | None:
+        now = time.monotonic()
+        with self._lock:
+            ready = [name for name in names if self._cooldown_until.get(name, 0.0) <= now]
+            if not ready:
+                return None
+            name = min(ready, key=lambda item: self._last_used.get(item, 0.0))
+            self._last_used[name] = now
+            return name
+
+    def cool(self, name: str) -> None:
+        with self._lock:
+            self._cooldown_until[name] = time.monotonic() + _CLAUDE_ACCOUNT_COOLDOWN_SECONDS
+
+
+_CLAUDE_ACCOUNTS = _ClaudeAccounts()
 
 
 def _truncate(text: str, *, max_chars: int = _CODEX_FAILURE_LOG_LIMIT) -> str:
@@ -277,6 +337,21 @@ def _model_options(payload: dict[str, Any]) -> tuple[str, str, str]:
     if effort not in efforts:
         raise _bad_request("UNSUPPORTED_EFFORT", f"{model} supports: {', '.join(efforts)}")
     return model, provider, effort
+
+
+def _requested_routes(payload: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Return (model, provider, effort) routes in the order they are tried.
+
+    A named model is one route. No model (or "auto") selects a level's routes.
+    """
+    if payload.get("model") not in (None, "auto"):
+        return [_model_options(payload)]
+    if "provider" in payload:
+        raise _bad_request("INVALID_PROVIDER", "provider requires a model")
+    level = _optional_reasoning_effort(payload) or "medium"
+    if level not in _LEVEL_ROUTES:
+        raise _bad_request("UNSUPPORTED_EFFORT", "Without a model use: " + ", ".join(_LEVEL_ROUTES))
+    return [(model, _MODELS[model][0], effort) for model, effort in _LEVEL_ROUTES[level]]
 
 
 def _output_schema(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -519,39 +594,61 @@ def _claude_exec_text(*, request_id: str, prompt: str, model: str,
     env["DISABLE_AUTOUPDATER"] = "1"
     if config_dir := os.getenv("CLAUDE_CONFIG_DIR"):
         env["CLAUDE_CONFIG_DIR"] = config_dir
-    try:
-        if token := _claude_oauth_token():
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    except (OSError, ValueError) as exc:
+    tokens = _claude_tokens()
+    if not tokens:
         raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
-                                    model=model, detail_message="Invalid Claude token binding") from exc
-    try:
-        # Empty cwd prevents project instructions or source files entering completions.
-        with tempfile.TemporaryDirectory(prefix="bridge-claude-") as cwd:
-            proc = subprocess.run(cmd, input=prompt, text=True, cwd=cwd, env=env,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  timeout=_DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
-                                    model=model, detail_message="Claude CLI failed or timed out") from exc
-    if proc.returncode:
-        # Do not publish auth URLs, tokens, or prompt content from CLI diagnostics.
-        raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
-                                    model=model, detail_message=f"Claude CLI exited {proc.returncode}")
-    try:
-        result = json.loads(proc.stdout)
-        if result.get("is_error"):
-            raise ValueError("Claude result is an error")
-        text = (json.dumps(result["structured_output"]) if schema is not None
-                else result["result"])
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("No completion")
-    except (ValueError, KeyError, TypeError) as exc:
-        raise _codex_exec_http_error(code="CLAUDE_INVALID_RESPONSE", request_id=request_id,
-                                    model=model, detail_message="Claude returned no valid completion") from exc
-    _LOGGER.info("claude_exec_success request_id=%s model=%s reasoning_effort=%s model_usage=%s",
-                 request_id, model, reasoning_effort, list(result.get("modelUsage", {})))
-    return _CodexExecResult(text=text, raw_json_events=[result])
+                                    model=model, detail_message="No Claude account tokens")
+    while (account := _CLAUDE_ACCOUNTS.acquire(tokens)) is not None:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = tokens[account]
+        try:
+            # Empty cwd prevents project instructions or source files entering completions.
+            with tempfile.TemporaryDirectory(prefix="bridge-claude-") as cwd:
+                proc = subprocess.run(cmd, input=prompt, text=True, cwd=cwd, env=env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      timeout=_DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
+                                        model=model, detail_message="Claude CLI failed or timed out") from exc
+        try:
+            result = json.loads(proc.stdout)
+        except ValueError:
+            result = None
+        if isinstance(result, dict) and result.get("is_error") \
+                and result.get("api_error_status") in _CLAUDE_LIMIT_STATUSES:
+            # Quota or credential rejection happens before any generation, so the
+            # next account can take the request. Log the cause, never the prompt.
+            status = result["api_error_status"]
+            _CLAUDE_ACCOUNTS.cool(account)
+            _LOGGER.warning("claude_account_unavailable request_id=%s account=%s status=%s message=%s",
+                            request_id, account, status,
+                            _truncate(str(result.get("result", "")), max_chars=200) if status == 429 else "")
+            continue
+        if proc.returncode:
+            # Do not publish auth URLs, tokens, or prompt content from CLI diagnostics.
+            _LOGGER.warning("claude_exec_failed request_id=%s account=%s returncode=%s status=%s",
+                            request_id, account, proc.returncode,
+                            result.get("api_error_status") if isinstance(result, dict) else None)
+            raise _codex_exec_http_error(code="CLAUDE_EXEC_FAILED", request_id=request_id,
+                                        model=model, detail_message=f"Claude CLI exited {proc.returncode}")
+        try:
+            if not isinstance(result, dict) or result.get("is_error"):
+                raise ValueError("Claude result is an error")
+            text = (json.dumps(result["structured_output"]) if schema is not None
+                    else result["result"])
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("No completion")
+        except (ValueError, KeyError, TypeError) as exc:
+            _LOGGER.warning("claude_invalid_response request_id=%s account=%s status=%s", request_id, account,
+                            result.get("api_error_status") if isinstance(result, dict) else None)
+            raise _codex_exec_http_error(code="CLAUDE_INVALID_RESPONSE", request_id=request_id,
+                                        model=model, detail_message="Claude returned no valid completion") from exc
+        _LOGGER.info("claude_exec_success request_id=%s account=%s model=%s reasoning_effort=%s model_usage=%s",
+                     request_id, account, model, reasoning_effort, list(result.get("modelUsage", {})))
+        return _CodexExecResult(text=text, raw_json_events=[result])
+    _LOGGER.warning("claude_accounts_exhausted request_id=%s accounts=%s", request_id, len(tokens))
+    raise _Exhausted(status_code=503, detail={
+        "code": "CLAUDE_ACCOUNTS_EXHAUSTED", "message": "Every Claude account is at its limit or rejected",
+        "request_id": request_id, "model": model})
 
 
 def _cli_reply(*, request_id: str, prompt: str, model: str, provider: str,
@@ -625,6 +722,10 @@ def create_app() -> FastAPI:
         now = int(time.time())
         return {
             "object": "list",
+            "levels": {
+                level: [{"model": model, "reasoning_effort": effort} for model, effort in routes]
+                for level, routes in _LEVEL_ROUTES.items()
+            },
             "data": [
                 {
                     "id": model,
@@ -656,7 +757,7 @@ def create_app() -> FastAPI:
             len(payload.get("messages", [])),
         )
 
-        model, provider, reasoning_effort = _model_options(payload)
+        routes = _requested_routes(payload)
         messages = _require_messages(payload)
         stream = _optional_stream(payload)
         web_search = _optional_web_search(payload)
@@ -665,40 +766,56 @@ def create_app() -> FastAPI:
         prompt = _build_prompt(messages)
         completion_id = f"chatcmpl_{uuid.uuid4().hex}"
         created = int(time.time())
-        try:
-            result = await asyncio.to_thread(
-                _cli_reply,
-                request_id=request_id,
-                prompt=prompt,
-                model=model,
-                provider=provider,
-                reasoning_effort=reasoning_effort,
-                schema=schema,
-                web_search=web_search,
-            )
-        except HTTPException:
-            _LOGGER.warning(
-                "chat_completions_failed request_id=%s model=%s",
-                request_id,
-                model,
-            )
-            raise
-        except Exception as exc:
-            _LOGGER.exception(
-                "chat_completions_unexpected request_id=%s model=%s error=%s",
-                request_id,
-                model,
-                str(exc),
-            )
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "code": "CLI_EXEC_FAILED",
-                    "message": "Selected CLI failed",
-                    "request_id": request_id,
-                    "model": model,
-                },
-            ) from exc
+        for position, (model, provider, reasoning_effort) in enumerate(routes, start=1):
+            try:
+                result = await asyncio.to_thread(
+                    _cli_reply,
+                    request_id=request_id,
+                    prompt=prompt,
+                    model=model,
+                    provider=provider,
+                    reasoning_effort=reasoning_effort,
+                    schema=schema,
+                    web_search=web_search,
+                )
+                break
+            except _Exhausted:
+                if position == len(routes):
+                    _LOGGER.warning(
+                        "chat_completions_failed request_id=%s model=%s",
+                        request_id,
+                        model,
+                    )
+                    raise
+                _LOGGER.warning(
+                    "chat_route_exhausted request_id=%s model=%s next_model=%s",
+                    request_id,
+                    model,
+                    routes[position][0],
+                )
+            except HTTPException:
+                _LOGGER.warning(
+                    "chat_completions_failed request_id=%s model=%s",
+                    request_id,
+                    model,
+                )
+                raise
+            except Exception as exc:
+                _LOGGER.exception(
+                    "chat_completions_unexpected request_id=%s model=%s error=%s",
+                    request_id,
+                    model,
+                    str(exc),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "code": "CLI_EXEC_FAILED",
+                        "message": "Selected CLI failed",
+                        "request_id": request_id,
+                        "model": model,
+                    },
+                ) from exc
 
         elapsed_ms = int((time.time() - started) * 1000)
         _LOGGER.info(

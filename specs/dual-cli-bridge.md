@@ -4,7 +4,8 @@ Objective: trusted applications choose a Codex or Claude model and effort throug
 the existing completion endpoint, including native structured output.
 
 Constraints: preserve private authentication and existing Stocks callers; one CLI
-per request with no provider fallback; no credentials in source or response;
+per request; levels fall back from Claude to Codex only when every Claude account is
+out of quota, before any output; no credentials in source or response;
 Claude completions have no tools, hooks, MCP connections, or persisted sessions;
 keep each CLI's login in its own private volume.
 
